@@ -1,0 +1,41 @@
+Baseball Performance and Team Efficiency Case Study
+
+Objective:
+Analyze team and player performance over multiple seasons using publicly available baseball
+data from Retrosheet. Your goal is to transform raw game logs (and other available data as
+necessary) into a structured and scalable dataset that supports exploration of team efficiency,
+player contributions, and game dynamics. Emphasis should be placed on data modeling and
+outlining how the pipeline could be operationalized for ongoing use by an MLB exec or team
+owner.
+
+Instructions:
+Using Retrosheet datasets, extract, clean, and structure the data to support downstream analysis.
+Design a relational schema and consider how to enable efficient querying and long-term
+maintainability of the dataset.
+
+Key Considerations:
+1. Data Preparation
+- Use Python and SQL to ingest and transform data from Retrosheet
+(https://www.retrosheet.org/game.htm).
+- Identify fields relevant to team performance, game outcomes, etc.
+- Structure the data to enable multi-season comparison and querying.
+2. Schema Design
+- Define a relational schema that captures core entities such as games, teams, and
+players.
+- Document the schema and explain key modeling decisions.
+3. Data Pipeline & Operationalization
+- Outline how you would automate and maintain the extraction and transformation
+process.
+- Consider factors such as scalability, scheduling, data quality, and extensibility.
+- Suggest how the data could be surfaced to non-technical stakeholders (e.g.,
+executives, analysts).
+4. Demonstrating Usability
+- Provide one or more examples of how the structured dataset could be used to
+answer high-level questions related to performance or strategy.
+- These examples are meant to illustrate the value of the model rather than serve as
+a deep analysis. Feel free to use a visualization tool of your choice.
+
+Deliverables:
+• Python and SQL scripts for data extraction and transformation.
+• Relational schema documentation.
+• Summary of how the data could be used and operationalized.
