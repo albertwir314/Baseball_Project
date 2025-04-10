@@ -10,7 +10,7 @@ class BaseballDataWarehouse:
     def connect(self):
         """Connect to the SQLite database"""
         self.conn = sqlite3.connect(self.db_path)
-        self.conn.row_factory = sqlite3.Row  # Return rows as dictionaries
+        self.conn.row_factory = sqlite3.Row
         self.cursor = self.conn.cursor()
         print(f"Connected to database: {self.db_path}")
         
@@ -27,9 +27,11 @@ class BaseballDataWarehouse:
                 self.cursor.execute(query, params)
             else:
                 self.cursor.execute(query)
+            self.conn.commit()  # Ensure changes are saved
             return self.cursor.fetchall() if fetch else None
         except sqlite3.Error as e:
             print(f"Error executing query: {e}\nQuery: {query}")
+            self.conn.rollback()  # Rollback on error
             return None
 
     def build_data_warehouse(self):
@@ -40,7 +42,12 @@ class BaseballDataWarehouse:
         self.connect()
         
         try:
-            # Create all tables
+            # Verify source tables exist first
+            if not self._verify_source_tables():
+                print("Aborting build due to missing source tables")
+                return
+            
+            # Create all tables with explicit error checking
             self._create_dimension_tables()
             self._create_fact_tables()
             self._create_indexes()
@@ -48,19 +55,47 @@ class BaseballDataWarehouse:
             # Verify counts
             self._verify_table_counts()
             
+        except Exception as e:
+            print(f"Error during build: {e}")
+            self.conn.rollback()
         finally:
             self.close()
         
         duration = datetime.now() - start_time
         print(f"\nData warehouse build completed in {duration.total_seconds():.2f} seconds")
 
+    def _verify_source_tables(self):
+        """Verify all required source tables exist"""
+        required_tables = ['gameinfo', 'batting', 'pitching', 'allplayers', 'teamstats', 'fielding']
+        missing_tables = []
+        
+        for table in required_tables:
+            result = self.execute_query(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?;", 
+                (table,)
+            )
+            if not result:
+                missing_tables.append(table)
+        
+        if missing_tables:
+            print(f"ERROR: Missing required source tables: {', '.join(missing_tables)}")
+            return False
+        return True
+
     def _create_dimension_tables(self):
-        """Create all dimension tables"""
+        """Create all dimension tables with error checking"""
         print("\nCreating dimension tables...")
         
+        # Drop existing tables first to ensure clean slate
+        self.execute_query("DROP TABLE IF EXISTS DimPlayer;", fetch=False)
+        self.execute_query("DROP TABLE IF EXISTS DimTeam;", fetch=False)
+        self.execute_query("DROP TABLE IF EXISTS DimGame;", fetch=False)
+        self.execute_query("DROP TABLE IF EXISTS DimDate;", fetch=False)
+        
         # DimPlayer
+        print("Creating DimPlayer...")
         self.execute_query("""
-        CREATE TABLE IF NOT EXISTS DimPlayer AS
+        CREATE TABLE DimPlayer AS
         SELECT DISTINCT
             id AS player_id,
             first || ' ' || last AS player_name,
@@ -72,8 +107,9 @@ class BaseballDataWarehouse:
         """, fetch=False)
         
         # DimTeam
+        print("Creating DimTeam...")
         self.execute_query("""
-        CREATE TABLE IF NOT EXISTS DimTeam AS
+        CREATE TABLE DimTeam AS
         SELECT DISTINCT team AS team_id FROM (
             SELECT team FROM allplayers UNION
             SELECT visteam FROM gameinfo UNION
@@ -86,8 +122,9 @@ class BaseballDataWarehouse:
         """, fetch=False)
         
         # DimGame
+        print("Creating DimGame...")
         self.execute_query("""
-        CREATE TABLE IF NOT EXISTS DimGame AS
+        CREATE TABLE DimGame AS
         SELECT 
             gid AS game_id,
             date AS game_date,
@@ -118,7 +155,8 @@ class BaseballDataWarehouse:
         FROM gameinfo;
         """, fetch=False)
         
-        # DimDate - Fixed to handle date format issues
+        # DimDate
+        print("Creating DimDate...")
         min_date_result = self.execute_query("SELECT MIN(date) FROM gameinfo;")
         max_date_result = self.execute_query("SELECT MAX(date) FROM gameinfo;")
         
@@ -129,21 +167,18 @@ class BaseballDataWarehouse:
         min_date = min_date_result[0][0]
         max_date = max_date_result[0][0]
         
-        # Handle different date formats (string or integer)
-        if isinstance(min_date, int):
-            # Convert from Unix timestamp if dates are stored as integers
-            min_date = datetime.fromtimestamp(min_date).strftime("%Y-%m-%d")
-            max_date = datetime.fromtimestamp(max_date).strftime("%Y-%m-%d")
-        elif isinstance(min_date, str):
-            # Ensure the string is in correct format
-            try:
+        # Handle different date formats
+        try:
+            if isinstance(min_date, int):
+                min_date = datetime.fromtimestamp(min_date).strftime("%Y-%m-%d")
+                max_date = datetime.fromtimestamp(max_date).strftime("%Y-%m-%d")
+            else:
+                # Try to parse as string
                 datetime.strptime(min_date, "%Y-%m-%d")
-            except ValueError:
-                print(f"Warning: Unsupported date format: {min_date}")
-                return
+        except ValueError:
+            print(f"Warning: Unsupported date format: {min_date}")
+            return
         
-        # Create date dimension with all dates in range
-        self.execute_query("DROP TABLE IF EXISTS DimDate;", fetch=False)
         self.execute_query("""
         CREATE TABLE DimDate (
             date_id TEXT PRIMARY KEY,
@@ -157,7 +192,6 @@ class BaseballDataWarehouse:
         );
         """, fetch=False)
         
-        # Generate and insert all dates in range
         current_date = datetime.strptime(min_date, "%Y-%m-%d").date()
         end_date = datetime.strptime(max_date, "%Y-%m-%d").date()
         
@@ -166,7 +200,7 @@ class BaseballDataWarehouse:
             year = current_date.year
             month = current_date.month
             day = current_date.day
-            day_of_week = current_date.weekday()  # Monday=0, Sunday=6
+            day_of_week = current_date.weekday()
             week_of_year = current_date.isocalendar()[1]
             season_period = "Regular" if 3 <= month <= 10 else "Offseason"
             
@@ -179,12 +213,18 @@ class BaseballDataWarehouse:
         print("Created all dimension tables")
 
     def _create_fact_tables(self):
-        """Create all fact tables"""
+        """Create all fact tables with explicit error checking"""
         print("\nCreating fact tables...")
         
+        # Drop existing tables first
+        self.execute_query("DROP TABLE IF EXISTS FactBatting;", fetch=False)
+        self.execute_query("DROP TABLE IF EXISTS FactPitching;", fetch=False)
+        self.execute_query("DROP TABLE IF EXISTS FactGameOutcomes;", fetch=False)
+        
         # FactBatting
+        print("Creating FactBatting...")
         self.execute_query("""
-        CREATE TABLE IF NOT EXISTS FactBatting AS
+        CREATE TABLE FactBatting AS
         SELECT
             b.gid AS game_id,
             b.id AS player_id,
@@ -216,9 +256,14 @@ class BaseballDataWarehouse:
         JOIN gameinfo g ON b.gid = g.gid;
         """, fetch=False)
         
+        # Verify FactBatting was created
+        result = self.execute_query("SELECT COUNT(*) FROM FactBatting;")
+        print(f"FactBatting created with {result[0][0] if result else 0} records")
+        
         # FactPitching
+        print("Creating FactPitching...")
         self.execute_query("""
-        CREATE TABLE IF NOT EXISTS FactPitching AS
+        CREATE TABLE FactPitching AS
         SELECT
             p.gid AS game_id,
             p.id AS player_id,
@@ -245,9 +290,14 @@ class BaseballDataWarehouse:
         JOIN gameinfo g ON p.gid = g.gid;
         """, fetch=False)
         
+        # Verify FactPitching was created
+        result = self.execute_query("SELECT COUNT(*) FROM FactPitching;")
+        print(f"FactPitching created with {result[0][0] if result else 0} records")
+        
         # FactGameOutcomes
+        print("Creating FactGameOutcomes...")
         self.execute_query("""
-        CREATE TABLE IF NOT EXISTS FactGameOutcomes AS
+        CREATE TABLE FactGameOutcomes AS
         SELECT
             g.gid AS game_id,
             g.date AS game_date,
@@ -263,6 +313,10 @@ class BaseballDataWarehouse:
             g.attendance
         FROM gameinfo g;
         """, fetch=False)
+        
+        # Verify FactGameOutcomes was created
+        result = self.execute_query("SELECT COUNT(*) FROM FactGameOutcomes;")
+        print(f"FactGameOutcomes created with {result[0][0] if result else 0} records")
         
         print("Created all fact tables")
 
@@ -283,6 +337,9 @@ class BaseballDataWarehouse:
         # Fact tables indexes
         self.execute_query("CREATE INDEX IF NOT EXISTS idx_fact_batting_game ON FactBatting(game_id);", fetch=False)
         self.execute_query("CREATE INDEX IF NOT EXISTS idx_fact_batting_player ON FactBatting(player_id);", fetch=False)
+        self.execute_query("CREATE INDEX IF NOT EXISTS idx_fact_pitching_game ON FactPitching(game_id);", fetch=False)
+        self.execute_query("CREATE INDEX IF NOT EXISTS idx_fact_pitching_player ON FactPitching(player_id);", fetch=False)
+        self.execute_query("CREATE INDEX IF NOT EXISTS idx_fact_outcomes_game ON FactGameOutcomes(game_id);", fetch=False)
         
         print("Created indexes")
 
@@ -296,14 +353,25 @@ class BaseballDataWarehouse:
         ]
         
         for table in tables:
-            count = self.execute_query(f"SELECT COUNT(*) FROM {table};")
-            if count:
-                print(f"{table:20}: {count[0][0]:,} records")
-            else:
-                print(f"{table:20}: Could not retrieve count")
+            try:
+                count = self.execute_query(f"SELECT COUNT(*) FROM {table};")
+                if count:
+                    print(f"{table:20}: {count[0][0]:,} records")
+                else:
+                    print(f"{table:20}: Could not retrieve count")
+            except sqlite3.Error as e:
+                print(f"{table:20}: ERROR - {str(e)}")
 
     def query_player_stats(self, player_name=None, season=None, limit=5):
         """Get player statistics with optional filters"""
+        # First check if FactBatting exists
+        result = self.execute_query(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='FactBatting';"
+        )
+        if not result:
+            print("Error: FactBatting table does not exist")
+            return []
+        
         query = """
         SELECT 
             p.player_name,
@@ -340,6 +408,14 @@ class BaseballDataWarehouse:
 
     def query_team_performance(self, team_id, season=None):
         """Get team performance summary"""
+        # First check if FactGameOutcomes exists
+        result = self.execute_query(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='FactGameOutcomes';"
+        )
+        if not result:
+            print("Error: FactGameOutcomes table does not exist")
+            return None
+        
         query = """
         SELECT 
             t.team_id,
@@ -368,7 +444,6 @@ class BaseballDataWarehouse:
         return dict(results[0]) if results else None
 
 
-# Example Usage
 if __name__ == "__main__":
     dw = BaseballDataWarehouse("baseball-database.db")
     dw.build_data_warehouse()
@@ -377,13 +452,19 @@ if __name__ == "__main__":
     dw.connect()
     try:
         print("\nTop 5 players by hits:")
-        for player in dw.query_player_stats(limit=5):
-            print(f"{player['player_name']:20} {player['H']:4} hits ({player['AVG']:.3f} AVG)")
+        players = dw.query_player_stats(limit=5)
+        if players:
+            for player in players:
+                print(f"{player['player_name']:20} {player['H']:4} hits ({player['AVG']:.3f} AVG)")
+        else:
+            print("No player stats available")
         
         print("\nTeam performance:")
         team_perf = dw.query_team_performance("ANA")  # Use actual team ID from your data
         if team_perf:
             print(f"Team {team_perf['team_id']}: {team_perf['wins']}-{team_perf['losses']}-{team_perf['ties']}")
             print(f"Runs: {team_perf['runs_scored']} scored, {team_perf['runs_allowed']} allowed")
+        else:
+            print("No team performance data available")
     finally:
         dw.close()
